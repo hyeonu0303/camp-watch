@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """땅끝오토캠핑장 글램핑 2026-10-17 예약가능 감시 → ntfy 푸시 알림"""
 import http.cookiejar, json, os, re, sys, urllib.parse, urllib.request
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 
 DIR = os.path.dirname(os.path.abspath(__file__))
 TARGET = "2026-10-17"
@@ -10,6 +10,8 @@ CAL_URL = f"{BASE}/glamping/reserve.html?pid=25&date=2026-10&reserve_form=calend
 UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/128 Safari/537.36"
 TOPIC = os.environ["NTFY_TOPIC"]
 STATE = os.path.join(DIR, "state.json")
+KST = timezone(timedelta(hours=9))
+HEARTBEAT_HOURS = [9, 13, 17, 21]  # 정기 상태 알림 (한국시간)
 
 
 def log(msg):
@@ -36,6 +38,25 @@ def fetch_calendar():
     return opener.open(CAL_URL, timeout=20).read().decode("euc-kr", "replace")
 
 
+def current_slot():
+    """지금 시각 기준 가장 최근 정기알림 시각 (예: '2026-09-30 13시')"""
+    now = datetime.now(KST)
+    past = [h for h in HEARTBEAT_HOURS if h <= now.hour]
+    if past:
+        return f"{now:%Y-%m-%d} {past[-1]}시"
+    return f"{now - timedelta(days=1):%Y-%m-%d} {HEARTBEAT_HOURS[-1]}시"
+
+
+def heartbeat(state, message):
+    slot = current_slot()
+    if state.get("hb") == slot:
+        return
+    notify("✅ 캠핑장 감시 정상 작동 중" if not state.get("error") else "⚠️ 캠핑장 감시 오류 지속",
+           f"{message}\n확인 시각: {datetime.now(KST):%m/%d %H:%M}", priority=2)
+    state["hb"] = slot
+    log(f"정기 알림 전송: {slot}")
+
+
 def load_state():
     try:
         return json.load(open(STATE))
@@ -56,6 +77,7 @@ def main():
         if not state.get("error"):
             notify("캠핑장 감시 오류", f"확인 중 오류가 발생했어요: {e}", priority=3)
         state["error"] = True
+        heartbeat(state, f"오류: {e}")
         json.dump(state, open(STATE, "w"), ensure_ascii=False)
         return 1
 
@@ -64,7 +86,9 @@ def main():
     if new:
         notify(f"🏕️ {TARGET} 예약 가능!", f"가능 객실: {', '.join(rooms)}\n눌러서 바로 예약하세요.")
         log(f"알림 전송: {new}")
-    json.dump({"rooms": rooms, "error": False}, open(STATE, "w"), ensure_ascii=False)
+    state.update(rooms=rooms, error=False)
+    heartbeat(state, f"10/17: " + (f"가능 {len(rooms)}개 - {', '.join(rooms)}" if rooms else "아직 전 객실 마감"))
+    json.dump(state, open(STATE, "w"), ensure_ascii=False)
     return 0
 
 
